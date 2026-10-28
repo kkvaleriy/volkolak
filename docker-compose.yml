@@ -1,0 +1,228 @@
+# Сервер: инфраструктура и activity-воркер.
+# Клиент и воркфлоу запускаются локально: go run ./cmd/api
+# Пример переменных для ноутбука — .env.local.example
+#
+#   docker compose up -d --build
+#
+# UI Temporal: http://<сервер>:8080
+# Консоль MinIO: http://<сервер>:9001
+
+name: volkolak
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:1.31.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: postgres
+      SQL_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./deploy/temporal/scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/setup-postgres.sh"]
+    restart: on-failure:6
+
+  temporal:
+    image: temporalio/server:1.31.0
+    depends_on:
+      temporal-admin-tools:
+        condition: service_completed_successfully
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: postgres
+      BIND_ON_IP: 0.0.0.0
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "${TEMPORAL_PORT}:7233"
+    volumes:
+      - ./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+    restart: unless-stopped
+
+  temporal-create-namespace:
+    image: temporalio/admin-tools:1.31.0
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      DEFAULT_NAMESPACE: default
+    volumes:
+      - ./deploy/temporal/scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/create-namespace.sh"]
+    restart: on-failure:5
+
+  temporal-ui:
+    image: temporalio/ui:2.49.1
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:${TEMPORAL_UI_PORT}
+    ports:
+      - "${TEMPORAL_UI_PORT}:8080"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        i=0
+        until mc alias set local http://minio:9000 "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY"; do
+          i=$$((i+1))
+          if [ "$$i" -gt 30 ]; then
+            echo "minio не поднялся"
+            exit 1
+          fi
+          sleep 2
+        done
+        mc mb -p "local/$$S3_BUCKET" || true
+    restart: on-failure:5
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: 30m
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT}:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      VISION_MODEL: ${VISION_MODEL}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$VISION_MODEL\""]
+    restart: on-failure:10
+
+  whisper-model:
+    image: curlimages/curl:8.11.1
+    user: "0:0"
+    environment:
+      WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME}
+    volumes:
+      - whisper-models:/models
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        name="$$WHISPER_MODEL_NAME"
+        dest="/models/ggml-$${name}.bin"
+        if [ -s "$$dest" ]; then
+          echo "whisper model already present: $$dest"
+          exit 0
+        fi
+        echo "downloading ggml-$$name"
+        curl -fL --retry 8 --retry-delay 2 -o "$${dest}.partial" \
+          "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$${name}.bin"
+        mv "$${dest}.partial" "$$dest"
+    restart: on-failure:10
+
+  worker:
+    build: .
+    depends_on:
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      whisper-model:
+        condition: service_completed_successfully
+      ollama-pull:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS}
+      TEMPORAL_ACTIVITY_TASK_QUEUE: ${TEMPORAL_ACTIVITY_TASK_QUEUE}
+      DATABASE_URL: ${DATABASE_URL}
+      WHISPER_MODEL: ${WHISPER_MODEL}
+      WHISPER_THREADS: ${WHISPER_THREADS}
+      OLLAMA_URL: ${OLLAMA_URL}
+      VISION_MODEL: ${VISION_MODEL}
+      TESSERACT_LANG: ${TESSERACT_LANG}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      S3_USE_SSL: ${S3_USE_SSL}
+      FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
+      MAX_FRAMES: ${MAX_FRAMES}
+    volumes:
+      - whisper-models:/models
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  whisper-models:
+  ollama:
+  minio-data:

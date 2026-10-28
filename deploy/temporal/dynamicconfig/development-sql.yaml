@@ -1,0 +1,8 @@
+# Настройки локального Temporal с видимостью в Postgres.
+# Файл тот же, что в temporalio/samples-server.
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}
