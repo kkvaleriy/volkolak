@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
 
-FROM debian:bookworm-slim AS whisper-build
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS whisper-build
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates cmake git \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone --depth 1 --branch v1.9.2 https://github.com/ggml-org/whisper.cpp.git . \
-    && cmake -B build -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+    && cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100;120" \
     && cmake --build build --parallel --target whisper-cli \
     && bin="$(find build -type f -name whisper-cli -perm -111 | head -n 1)" \
     && test -n "$bin" \
@@ -27,7 +29,8 @@ RUN apt-get update \
 COPY --from=go-build /out/worker /usr/local/bin/worker
 ENTRYPOINT ["/usr/local/bin/worker"]
 
-FROM debian:bookworm-slim AS transcribe
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS transcribe
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgomp1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*

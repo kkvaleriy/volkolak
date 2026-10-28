@@ -54,7 +54,7 @@ func FromEnv() Config {
 		TesseractLang:       getenv("TESSERACT_LANG", "rus+eng"),
 		WhisperBin:          getenv("WHISPER_BIN", "whisper-cli"),
 		WhisperModel:        getenv("WHISPER_MODEL", "/models/ggml-small.bin"),
-		WhisperThreads:      getenvInt("WHISPER_THREADS", 4),
+		WhisperThreads:      getenvOptionalInt("WHISPER_THREADS"),
 		OllamaURL:           getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
 		VisionModel:         getenv("VISION_MODEL", "qwen2.5vl:3b"),
 		S3Endpoint:          getenv("S3_ENDPOINT", "127.0.0.1:9000"),
@@ -108,6 +108,18 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvOptionalInt(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }
 
 func getenvInt(key string, fallback int) int {

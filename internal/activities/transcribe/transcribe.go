@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,7 @@ func (a *Activities) Transcribe(ctx context.Context, in TranscribeInput) (pipeli
 	}
 	threads := a.Threads
 	if threads < 1 {
-		threads = 4
+		threads = runtime.NumCPU()
 	}
 
 	stop := cmdx.Beat(ctx, "transcribe")
@@ -86,7 +87,6 @@ func (a *Activities) Transcribe(ctx context.Context, in TranscribeInput) (pipeli
 		"-ojf",
 		"-of", prefix,
 		"-t", strconv.Itoa(threads),
-		"-ng",
 		"-np",
 	)
 	if err != nil {
