@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1
 
-# whisper.cpp собирается здесь же, а не копируется готовым бинарником:
-# так он линкуется с glibc этого образа и без -march родного CPU сборщика.
 FROM debian:bookworm-slim AS whisper-build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates cmake git \
@@ -22,19 +20,26 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS scene
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        ffmpeg \
-        libgomp1 \
-        libstdc++6 \
-        p7zip-full \
-        tesseract-ocr \
-        tesseract-ocr-eng \
-        tesseract-ocr-rus \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=go-build /out/worker /usr/local/bin/worker
-COPY --from=go-build /out/api /usr/local/bin/api
+ENTRYPOINT ["/usr/local/bin/worker"]
+
+FROM debian:bookworm-slim AS transcribe
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-build /out/worker /usr/local/bin/worker
 COPY --from=whisper-build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
+ENTRYPOINT ["/usr/local/bin/worker"]
+
+FROM debian:bookworm-slim AS activities
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates ffmpeg p7zip-full \
+        tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-build /out/worker /usr/local/bin/worker
 ENTRYPOINT ["/usr/local/bin/worker"]

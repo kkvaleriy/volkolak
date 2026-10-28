@@ -189,25 +189,85 @@ services:
     restart: on-failure:10
 
   worker:
-    build: .
+    build:
+      context: .
+      target: activities
     depends_on:
       temporal-create-namespace:
-        condition: service_completed_successfully
-      whisper-model:
-        condition: service_completed_successfully
-      ollama-pull:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     environment:
+      WORKER_ROLE: activities
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS}
       TEMPORAL_ACTIVITY_TASK_QUEUE: ${TEMPORAL_ACTIVITY_TASK_QUEUE}
+      TEMPORAL_SCENE_TASK_QUEUE: ${TEMPORAL_SCENE_TASK_QUEUE}
+      TEMPORAL_TRANSCRIBE_TASK_QUEUE: ${TEMPORAL_TRANSCRIBE_TASK_QUEUE}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE}
       DATABASE_URL: ${DATABASE_URL}
-      WHISPER_MODEL: ${WHISPER_MODEL}
-      WHISPER_THREADS: ${WHISPER_THREADS}
+      TESSERACT_LANG: ${TESSERACT_LANG}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      S3_USE_SSL: ${S3_USE_SSL}
+      FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
+      MAX_FRAMES: ${MAX_FRAMES}
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  scene-worker:
+    build:
+      context: .
+      target: scene
+    depends_on:
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      ollama-pull:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ROLE: scene
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS}
+      TEMPORAL_ACTIVITY_TASK_QUEUE: ${TEMPORAL_ACTIVITY_TASK_QUEUE}
+      TEMPORAL_SCENE_TASK_QUEUE: ${TEMPORAL_SCENE_TASK_QUEUE}
+      TEMPORAL_TRANSCRIBE_TASK_QUEUE: ${TEMPORAL_TRANSCRIBE_TASK_QUEUE}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE}
       OLLAMA_URL: ${OLLAMA_URL}
       VISION_MODEL: ${VISION_MODEL}
-      TESSERACT_LANG: ${TESSERACT_LANG}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      S3_USE_SSL: ${S3_USE_SSL}
+      FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
+      MAX_FRAMES: ${MAX_FRAMES}
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  transcribe-worker:
+    build:
+      context: .
+      target: transcribe
+    depends_on:
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      whisper-model:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ROLE: transcribe
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS}
+      TEMPORAL_ACTIVITY_TASK_QUEUE: ${TEMPORAL_ACTIVITY_TASK_QUEUE}
+      TEMPORAL_SCENE_TASK_QUEUE: ${TEMPORAL_SCENE_TASK_QUEUE}
+      TEMPORAL_TRANSCRIBE_TASK_QUEUE: ${TEMPORAL_TRANSCRIBE_TASK_QUEUE}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE}
+      WHISPER_MODEL: ${WHISPER_MODEL}
+      WHISPER_THREADS: ${WHISPER_THREADS}
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
