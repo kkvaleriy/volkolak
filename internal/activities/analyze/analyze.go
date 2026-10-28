@@ -52,9 +52,35 @@ type AnalyzeResult struct {
 	Frames []pipeline.FrameAnalysis `json:"frames"`
 }
 
-// AnalyzeFrames для каждого кадра снимает текст и просит модель описать сцену.
-// Успешные кадры пишутся в heartbeat, чтобы повтор не гонял их заново.
-func (a *Activities) AnalyzeFrames(ctx context.Context, in AnalyzeInput) (AnalyzeResult, error) {
+// RecognizeText читает надписи на кадрах. Это activity основного воркера: Tesseract лёгкий.
+func (a *Activities) RecognizeText(ctx context.Context, in AnalyzeInput) (AnalyzeResult, error) {
+	return a.eachFrame(ctx, in, func(local string, item *pipeline.FrameAnalysis) error {
+		text, err := a.ocr(ctx, local)
+		if nonRetryable(err) {
+			return err
+		}
+		if err != nil {
+			item.Error = err.Error()
+			return nil
+		}
+		item.OCRText = text
+		return nil
+	})
+}
+
+// DescribeScenes определяет, что изображено на кадрах. Activity крутится в отдельном контейнере.
+func (a *Activities) DescribeScenes(ctx context.Context, in AnalyzeInput) (AnalyzeResult, error) {
+	return a.eachFrame(ctx, in, func(local string, item *pipeline.FrameAnalysis) error {
+		description, err := a.describe(ctx, local)
+		if err != nil {
+			return err
+		}
+		item.Description = description
+		return nil
+	})
+}
+
+func (a *Activities) eachFrame(ctx context.Context, in AnalyzeInput, visit func(local string, item *pipeline.FrameAnalysis) error) (AnalyzeResult, error) {
 	var mu sync.Mutex
 	var done AnalyzeResult
 
@@ -77,7 +103,7 @@ func (a *Activities) AnalyzeFrames(ctx context.Context, in AnalyzeInput) (Analyz
 	stop := cmdx.BeatDynamic(ctx, snapshot)
 	defer stop()
 
-	actlog.Info(ctx, "анализирую кадры", "count", len(in.Frames), "resume", len(done.Frames))
+	actlog.Info(ctx, "обрабатываю кадры", "count", len(in.Frames), "resume", len(done.Frames))
 	for i := len(done.Frames); i < len(in.Frames); i++ {
 		if err := ctx.Err(); err != nil {
 			return AnalyzeResult{}, err
@@ -92,19 +118,7 @@ func (a *Activities) AnalyzeFrames(ctx context.Context, in AnalyzeInput) (Analyz
 			TimestampSec: frame.TimestampSec,
 			Key:          frame.Key,
 		}
-
-		text, err := a.ocr(ctx, local)
-		if nonRetryable(err) {
-			cleanup()
-			return AnalyzeResult{}, err
-		}
-		if err != nil {
-			item.Error = err.Error()
-		} else {
-			item.OCRText = text
-		}
-
-		description, err := a.describe(ctx, local)
+		err = visit(local, &item)
 		cleanup()
 		if err != nil {
 			if activity.IsActivity(ctx) {
@@ -112,9 +126,7 @@ func (a *Activities) AnalyzeFrames(ctx context.Context, in AnalyzeInput) (Analyz
 			}
 			return AnalyzeResult{}, err
 		}
-		item.Description = description
 		item.Error, _ = pipeline.Clip(item.Error, 2000)
-
 		mu.Lock()
 		done.Frames = append(done.Frames, item)
 		mu.Unlock()

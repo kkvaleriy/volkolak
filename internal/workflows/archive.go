@@ -12,9 +12,11 @@ import (
 // ArchiveInput — архив, уже лежащий в объектном хранилище.
 // Интервал кадров и остальные настройки воркфлоу не принимает: они задаются окружением воркера.
 type ArchiveInput struct {
-	Key               string `json:"key"`
-	Filename          string `json:"filename"`
-	ActivityTaskQueue string `json:"activity_task_queue"`
+	Key                 string `json:"key"`
+	Filename            string `json:"filename"`
+	ActivityTaskQueue   string `json:"activity_task_queue"`
+	SceneTaskQueue      string `json:"scene_task_queue"`
+	TranscribeTaskQueue string `json:"transcribe_task_queue"`
 }
 
 // ArchiveResult — что получилось по каждому видео из архива.
@@ -27,8 +29,8 @@ type ArchiveResult struct {
 // ArchiveWorkflow принимает ключ архива и для каждого видео запускает VideoWorkflow.
 func ArchiveWorkflow(ctx workflow.Context, input ArchiveInput) (*ArchiveResult, error) {
 	logger := workflow.GetLogger(ctx)
-	if input.Key == "" || input.Filename == "" || input.ActivityTaskQueue == "" {
-		return nil, fail.Input("нужны key, filename и activity_task_queue")
+	if input.Key == "" || input.Filename == "" || input.ActivityTaskQueue == "" || input.SceneTaskQueue == "" || input.TranscribeTaskQueue == "" {
+		return nil, fail.Input("нужны key, filename и очереди activities, сцен и транскрибации")
 	}
 
 	var unpackActs *unpack.Activities
@@ -67,11 +69,13 @@ func ArchiveWorkflow(ctx workflow.Context, input ArchiveInput) (*ArchiveResult, 
 		})
 		var result VideoResult
 		err = workflow.ExecuteChildWorkflow(childCtx, VideoWorkflow, VideoInput{
-			ArchiveKey:        input.Key,
-			ArchiveType:       archiveType,
-			Video:             video,
-			RunPrefix:         runPrefix,
-			ActivityTaskQueue: input.ActivityTaskQueue,
+			ArchiveKey:          input.Key,
+			ArchiveType:         archiveType,
+			Video:               video,
+			RunPrefix:           runPrefix,
+			ActivityTaskQueue:   input.ActivityTaskQueue,
+			SceneTaskQueue:      input.SceneTaskQueue,
+			TranscribeTaskQueue: input.TranscribeTaskQueue,
 		}).Get(ctx, &result)
 		if err != nil {
 			return nil, fmt.Errorf("видео %s: %w", video.RelativePath, err)

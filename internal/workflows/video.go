@@ -15,11 +15,13 @@ import (
 
 // VideoInput — одно видео, уже лежащее в объектном хранилище.
 type VideoInput struct {
-	ArchiveKey        string             `json:"archive_key"`
-	ArchiveType       string             `json:"archive_type"`
-	Video             pipeline.VideoFile `json:"video"`
-	RunPrefix         string             `json:"run_prefix"`
-	ActivityTaskQueue string             `json:"activity_task_queue"`
+	ArchiveKey          string             `json:"archive_key"`
+	ArchiveType         string             `json:"archive_type"`
+	Video               pipeline.VideoFile `json:"video"`
+	RunPrefix           string             `json:"run_prefix"`
+	ActivityTaskQueue   string             `json:"activity_task_queue"`
+	SceneTaskQueue      string             `json:"scene_task_queue"`
+	TranscribeTaskQueue string             `json:"transcribe_task_queue"`
 }
 
 // VideoResult — краткий итог. Полные текст и описания лежат в базе, файлы — в бакете.
@@ -38,8 +40,8 @@ type VideoResult struct {
 // VideoWorkflow обрабатывает один ролик: шаги 3–9.
 func VideoWorkflow(ctx workflow.Context, input VideoInput) (*VideoResult, error) {
 	logger := workflow.GetLogger(ctx)
-	if input.Video.Key == "" || input.Video.Filename == "" || input.RunPrefix == "" || input.ArchiveKey == "" || input.ActivityTaskQueue == "" {
-		return nil, fail.Input("не хватает ключа видео, имени файла, префикса или очереди activities")
+	if input.Video.Key == "" || input.Video.Filename == "" || input.RunPrefix == "" || input.ArchiveKey == "" || input.ActivityTaskQueue == "" || input.SceneTaskQueue == "" || input.TranscribeTaskQueue == "" {
+		return nil, fail.Input("не хватает ключа видео, имени файла, префикса или очередей")
 	}
 	queue := input.ActivityTaskQueue
 
@@ -87,30 +89,45 @@ func VideoWorkflow(ctx workflow.Context, input VideoInput) (*VideoResult, error)
 		return nil, fmt.Errorf("нарезка кадров: %w", err)
 	}
 
-	logger.Info("6. анализирую кадры", "count", len(frames.Frames))
-	var analysis analyze.AnalyzeResult
+	logger.Info("6. читаю текст на кадрах", "count", len(frames.Frames))
+	var texts analyze.AnalyzeResult
 	err = workflow.ExecuteActivity(
-		longCtx(ctx, queue, 12*time.Hour, 24*time.Hour),
-		analyzeActs.AnalyzeFrames,
+		longCtx(ctx, queue, 2*time.Hour, 4*time.Hour),
+		analyzeActs.RecognizeText,
 		analyze.AnalyzeInput{Frames: frames.Frames},
-	).Get(ctx, &analysis)
+	).Get(ctx, &texts)
 	if err != nil {
-		return nil, fmt.Errorf("анализ кадров: %w", err)
+		return nil, fmt.Errorf("текст на кадрах: %w", err)
 	}
 
-	logger.Info("7. сохраняю разбор кадров", "count", len(analysis.Frames))
+	logger.Info("7. определяю сцены", "queue", input.SceneTaskQueue)
+	var scenes analyze.AnalyzeResult
+	err = workflow.ExecuteActivity(
+		longCtx(ctx, input.SceneTaskQueue, 12*time.Hour, 24*time.Hour),
+		analyzeActs.DescribeScenes,
+		analyze.AnalyzeInput{Frames: frames.Frames},
+	).Get(ctx, &scenes)
+	if err != nil {
+		return nil, fmt.Errorf("определение сцен: %w", err)
+	}
+	analysis, err := mergeFrameAnalysis(texts.Frames, scenes.Frames)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("8. сохраняю разбор кадров", "count", len(analysis))
 	err = workflow.ExecuteActivity(shortCtx(ctx, queue), storeActs.SaveFrameResults, store.SaveFramesInput{
 		VideoID: saved.VideoID,
-		Frames:  analysis.Frames,
+		Frames:  analysis,
 	}).Get(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("сохранение кадров: %w", err)
 	}
 
-	logger.Info("8. транскрибирую звук", "has_audio", audio.HasAudio)
+	logger.Info("9. транскрибирую звук", "has_audio", audio.HasAudio, "queue", input.TranscribeTaskQueue)
 	var transcript pipeline.Transcript
 	err = workflow.ExecuteActivity(
-		longCtx(ctx, queue, 12*time.Hour, 24*time.Hour),
+		longCtx(ctx, input.TranscribeTaskQueue, 12*time.Hour, 24*time.Hour),
 		speechActs.Transcribe,
 		transcribe.TranscribeInput{AudioKey: audio.AudioKey, HasAudio: audio.HasAudio},
 	).Get(ctx, &transcript)
@@ -118,7 +135,7 @@ func VideoWorkflow(ctx workflow.Context, input VideoInput) (*VideoResult, error)
 		return nil, fmt.Errorf("транскрибация: %w", err)
 	}
 
-	logger.Info("9. сохраняю расшифровку", "language", transcript.Language)
+	logger.Info("10. сохраняю расшифровку", "language", transcript.Language)
 	err = workflow.ExecuteActivity(shortCtx(ctx, queue), storeActs.SaveTranscript, store.SaveTranscriptInput{
 		VideoID:    saved.VideoID,
 		Transcript: transcript,
@@ -133,10 +150,29 @@ func VideoWorkflow(ctx workflow.Context, input VideoInput) (*VideoResult, error)
 		Filename:            input.Video.Filename,
 		RelativePath:        input.Video.RelativePath,
 		ObjectKey:           input.Video.Key,
-		FrameCount:          len(analysis.Frames),
+		FrameCount:          len(analysis),
 		Language:            transcript.Language,
 		HasAudio:            transcript.HasAudio,
 		Transcript:          preview,
 		TranscriptTruncated: truncated,
 	}, nil
+}
+
+func mergeFrameAnalysis(texts, scenes []pipeline.FrameAnalysis) ([]pipeline.FrameAnalysis, error) {
+	if len(texts) != len(scenes) {
+		return nil, fmt.Errorf("текст и сцены разошлись: %d и %d кадров", len(texts), len(scenes))
+	}
+	merged := make([]pipeline.FrameAnalysis, len(texts))
+	for i := range texts {
+		item := texts[i]
+		item.Description = scenes[i].Description
+		if scenes[i].Error != "" {
+			if item.Error != "" {
+				item.Error += "; "
+			}
+			item.Error += scenes[i].Error
+		}
+		merged[i] = item
+	}
+	return merged, nil
 }

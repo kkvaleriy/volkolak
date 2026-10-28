@@ -17,7 +17,10 @@ import (
 )
 
 func TestArchiveWorkflowOrder(t *testing.T) {
-	result := runArchive(t, ArchiveInput{Key: "archives/1/film.zip", Filename: "film.zip", ActivityTaskQueue: "volkolak-activity"})
+	result := runArchive(t, ArchiveInput{
+		Key: "archives/1/film.zip", Filename: "film.zip",
+		ActivityTaskQueue: "volkolak-activity", SceneTaskQueue: "volkolak-scene", TranscribeTaskQueue: "volkolak-transcribe",
+	})
 	require.Equal(t, "zip", result.ArchiveType)
 	require.Equal(t, 1, result.RemovedFiles)
 	require.Len(t, result.Videos, 1)
@@ -41,7 +44,10 @@ func TestArchiveWorkflowWithoutVideos(t *testing.T) {
 		Removed: 4,
 	}, nil).Once()
 
-	env.ExecuteWorkflow(ArchiveWorkflow, ArchiveInput{Key: "archives/empty.zip", Filename: "empty.zip", ActivityTaskQueue: "volkolak-activity"})
+	env.ExecuteWorkflow(ArchiveWorkflow, ArchiveInput{
+		Key: "archives/empty.zip", Filename: "empty.zip",
+		ActivityTaskQueue: "volkolak-activity", SceneTaskQueue: "volkolak-scene", TranscribeTaskQueue: "volkolak-transcribe",
+	})
 	require.NoError(t, env.GetWorkflowError())
 	var result ArchiveResult
 	require.NoError(t, env.GetWorkflowResult(&result))
@@ -110,11 +116,18 @@ func runArchive(t *testing.T, input ArchiveInput) ArchiveResult {
 				Index: 0, TimestampSec: 0, Key: "jobs/x/frames/frame_0001.jpg",
 			}}}, nil
 		}).Once()
-	env.OnActivity(new(analyze.Activities).AnalyzeFrames, mock.Anything, mock.Anything).
+	env.OnActivity(new(analyze.Activities).RecognizeText, mock.Anything, mock.Anything).
 		Return(func(context.Context, analyze.AnalyzeInput) (analyze.AnalyzeResult, error) {
-			note("analyze")
+			note("ocr")
 			return analyze.AnalyzeResult{Frames: []pipeline.FrameAnalysis{{
-				Index: 0, Key: "jobs/x/frames/frame_0001.jpg", OCRText: "титр", Description: "комната",
+				Index: 0, Key: "jobs/x/frames/frame_0001.jpg", OCRText: "титр",
+			}}}, nil
+		}).Once()
+	env.OnActivity(new(analyze.Activities).DescribeScenes, mock.Anything, mock.Anything).
+		Return(func(context.Context, analyze.AnalyzeInput) (analyze.AnalyzeResult, error) {
+			note("scenes")
+			return analyze.AnalyzeResult{Frames: []pipeline.FrameAnalysis{{
+				Index: 0, Key: "jobs/x/frames/frame_0001.jpg", Description: "комната",
 			}}}, nil
 		}).Once()
 	env.OnActivity(new(store.Activities).SaveFrameResults, mock.Anything, mock.Anything).
@@ -138,7 +151,7 @@ func runArchive(t *testing.T, input ArchiveInput) ArchiveResult {
 	var result ArchiveResult
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, []string{
-		"detect", "extract", "save-video", "audio", "frames", "analyze", "save-frames", "transcribe", "save-transcript",
+		"detect", "extract", "save-video", "audio", "frames", "ocr", "scenes", "save-frames", "transcribe", "save-transcript",
 	}, order)
 	env.AssertExpectations(t)
 	return result

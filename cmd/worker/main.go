@@ -14,6 +14,7 @@ import (
 	"github.com/kkvaleriy/volkolak/internal/bootstrap"
 	"github.com/kkvaleriy/volkolak/internal/config"
 	"github.com/kkvaleriy/volkolak/internal/s3store"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -38,16 +39,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("подключение к postgres")
-	pool, err := bootstrap.Database(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer pool.Close()
-	if err := store.Migrate(ctx, pool); err != nil {
-		log.Fatal(err)
-	}
-
 	log.Printf("подключение к temporal %s", cfg.TemporalAddress)
 	temporalClient, err := bootstrap.TemporalClient(ctx, cfg.TemporalAddress)
 	if err != nil {
@@ -55,42 +46,68 @@ func main() {
 	}
 	defer temporalClient.Close()
 
-	log.Printf("жду модель whisper %s", cfg.WhisperModel)
-	if err := bootstrap.WaitFile(ctx, cfg.WhisperModel); err != nil {
+	w, queue, err := newWorker(ctx, cfg, temporalClient, objects)
+	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("жду ollama %s", cfg.OllamaURL)
-	if err := bootstrap.WaitHTTP(ctx, cfg.OllamaURL); err != nil {
-		log.Fatal(err)
-	}
-
-	w := worker.New(temporalClient, cfg.ActivityTaskQueue, worker.Options{})
-	w.RegisterActivity(&unpack.Activities{Blobs: objects})
-	w.RegisterActivity(&media.Activities{
-		FFmpeg:      cfg.FFmpeg,
-		FFprobe:     cfg.FFprobe,
-		IntervalSec: cfg.FrameIntervalSec,
-		MaxFrames:   cfg.MaxFrames,
-		Blobs:       objects,
-	})
-	w.RegisterActivity(&analyze.Activities{
-		Tesseract: cfg.Tesseract,
-		Lang:      cfg.TesseractLang,
-		OllamaURL: cfg.OllamaURL,
-		Model:     cfg.VisionModel,
-		HTTP:      &http.Client{Timeout: 10 * time.Minute},
-		Blobs:     objects,
-	})
-	w.RegisterActivity(&transcribe.Activities{
-		Bin:     cfg.WhisperBin,
-		Model:   cfg.WhisperModel,
-		Threads: cfg.WhisperThreads,
-		Blobs:   objects,
-	})
-	w.RegisterActivity(&store.Activities{Pool: pool})
-
-	log.Printf("activity-воркер слушает очередь %s", cfg.ActivityTaskQueue)
+	log.Printf("роль %s слушает очередь %s", cfg.WorkerRole, queue)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func newWorker(ctx context.Context, cfg config.Config, temporalClient client.Client, objects *s3store.Client) (worker.Worker, string, error) {
+	switch cfg.WorkerRole {
+	case "scene":
+		log.Printf("жду ollama %s", cfg.OllamaURL)
+		if err := bootstrap.WaitHTTP(ctx, cfg.OllamaURL); err != nil {
+			return nil, "", err
+		}
+		w := worker.New(temporalClient, cfg.SceneTaskQueue, worker.Options{})
+		w.RegisterActivity((&analyze.Activities{
+			OllamaURL: cfg.OllamaURL,
+			Model:     cfg.VisionModel,
+			HTTP:      &http.Client{Timeout: 10 * time.Minute},
+			Blobs:     objects,
+		}).DescribeScenes)
+		return w, cfg.SceneTaskQueue, nil
+	case "transcribe":
+		log.Printf("жду модель whisper %s", cfg.WhisperModel)
+		if err := bootstrap.WaitFile(ctx, cfg.WhisperModel); err != nil {
+			return nil, "", err
+		}
+		w := worker.New(temporalClient, cfg.TranscribeTaskQueue, worker.Options{})
+		w.RegisterActivity((&transcribe.Activities{
+			Bin:     cfg.WhisperBin,
+			Model:   cfg.WhisperModel,
+			Threads: cfg.WhisperThreads,
+			Blobs:   objects,
+		}).Transcribe)
+		return w, cfg.TranscribeTaskQueue, nil
+	default:
+		log.Printf("подключение к postgres")
+		pool, err := bootstrap.Database(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := store.Migrate(ctx, pool); err != nil {
+			return nil, "", err
+		}
+		w := worker.New(temporalClient, cfg.ActivityTaskQueue, worker.Options{})
+		w.RegisterActivity(&unpack.Activities{Blobs: objects})
+		w.RegisterActivity(&media.Activities{
+			FFmpeg:      cfg.FFmpeg,
+			FFprobe:     cfg.FFprobe,
+			IntervalSec: cfg.FrameIntervalSec,
+			MaxFrames:   cfg.MaxFrames,
+			Blobs:       objects,
+		})
+		w.RegisterActivity((&analyze.Activities{
+			Tesseract: cfg.Tesseract,
+			Lang:      cfg.TesseractLang,
+			Blobs:     objects,
+		}).RecognizeText)
+		w.RegisterActivity(&store.Activities{Pool: pool})
+		return w, cfg.ActivityTaskQueue, nil
 	}
 }

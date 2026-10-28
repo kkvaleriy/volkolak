@@ -86,9 +86,11 @@ func (s workflowStarter) Start(ctx context.Context, key, filename string) (strin
 		TaskQueue:                s.cfg.WorkflowTaskQueue,
 		WorkflowExecutionTimeout: s.cfg.WorkflowTimeout,
 	}, workflows.ArchiveWorkflow, workflows.ArchiveInput{
-		Key:               key,
-		Filename:          filename,
-		ActivityTaskQueue: s.cfg.ActivityTaskQueue,
+		Key:                 key,
+		Filename:            filename,
+		ActivityTaskQueue:   s.cfg.ActivityTaskQueue,
+		SceneTaskQueue:      s.cfg.SceneTaskQueue,
+		TranscribeTaskQueue: s.cfg.TranscribeTaskQueue,
 	})
 	if err != nil {
 		return "", "", err
