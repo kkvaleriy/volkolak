@@ -1,0 +1,48 @@
+openapi: 3.0.3
+info:
+  title: Volkolak
+  version: 1.0.0
+  description: Загрузка архива с видео и запуск обработки в Temporal.
+paths:
+  /v1/archives:
+    post:
+      operationId: uploadArchive
+      summary: Загрузить архив и запустить разбор
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Архив zip, tar, tar.gz, 7z или xz
+      responses:
+        "202":
+          description: Обработка поставлена в очередь
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow_id:
+                    type: string
+                  run_id:
+                    type: string
+                  key:
+                    type: string
+                    description: Ключ архива в бакете
+                  filename:
+                    type: string
+        "400":
+          description: В запросе нет файла
+  /healthz:
+    get:
+      operationId: health
+      summary: Проверка, что API отвечает
+      responses:
+        "200":
+          description: ok
