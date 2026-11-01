@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -76,7 +77,12 @@ func (a *Activities) DescribeScenes(ctx context.Context, in AnalyzeInput) (Analy
 	return a.eachFrame(ctx, in, func(local string, item *pipeline.FrameAnalysis) error {
 		description, err := a.describe(ctx, local)
 		if err != nil {
-			return err
+			if !visionGiveUp(err) {
+				return err
+			}
+			actlog.Info(ctx, "кадр без описания", "error", err.Error())
+			item.Error = err.Error()
+			return nil
 		}
 		item.Description = description
 		return nil
@@ -193,8 +199,8 @@ func (a *Activities) describe(ctx context.Context, imagePath string) (string, er
 	if err != nil {
 		return "", err
 	}
-	text, err := a.chat(ctx, jpegBytes, 0.6, 1.2)
-	if err == nil || !strings.Contains(err.Error(), "token repeat") {
+	text, err := a.chat(ctx, jpegBytes)
+	if err == nil || !visionGiveUp(err) {
 		return text, err
 	}
 	actlog.Info(ctx, "модель зациклилась, повторяю на меньшем кадре")
@@ -202,22 +208,26 @@ func (a *Activities) describe(ctx context.Context, imagePath string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return a.chat(ctx, jpegBytes, 0.8, 1.4)
+	return a.chat(ctx, jpegBytes)
 }
 
-func (a *Activities) chat(ctx context.Context, jpegBytes []byte, temperature, repeatPenalty float64) (string, error) {
+func (a *Activities) chat(ctx context.Context, jpegBytes []byte) (string, error) {
 	payload := map[string]any{
 		"model":      a.Model,
-		"stream":     false,
+		"stream":     true,
 		"keep_alive": "30m",
 		"options": map[string]any{
-			"temperature":    temperature,
-			"num_predict":    192,
+			// Ollama обрывает ответ ошибкой, если один и тот же кусок
+			// пришёл больше 100 раз, и выбрасывает уже написанный текст.
+			// Короткий лимит заканчивает генерацию раньше этого порога.
+			"temperature":    0.2,
+			"num_predict":    80,
 			"num_ctx":        4096,
-			"repeat_penalty": repeatPenalty,
-			"repeat_last_n":  192,
+			"repeat_penalty": 1.15,
+			"repeat_last_n":  64,
 			"top_p":          0.9,
 			"top_k":          40,
+			"stop":           []string{"\n\n"},
 		},
 		"messages": []map[string]any{{
 			"role":    "user",
@@ -251,7 +261,83 @@ func (a *Activities) chat(ctx context.Context, jpegBytes []byte, temperature, re
 		snippet, _ := pipeline.Clip(string(respBody), 500)
 		return "", fmt.Errorf("ollama статус %d: %s", resp.StatusCode, snippet)
 	}
-	return chatContent(respBody)
+	return readChatStream(bytes.NewReader(respBody))
+}
+
+// visionGiveUp — модель зациклилась. Повтор кадра это не лечит, activity из-за одного кадра не роняем.
+func visionGiveUp(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "token repeat") || strings.Contains(msg, "пустое описание")
+}
+
+// readChatStream собирает потоковый ответ /api/chat.
+// Если Ollama оборвала генерацию из-за повтора, уже полученный текст сохраняется.
+func readChatStream(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	var text strings.Builder
+	var streamErr error
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var parsed struct {
+			Error   string `json:"error"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &parsed); err != nil {
+			return "", fmt.Errorf("ответ ollama: %w", err)
+		}
+		text.WriteString(parsed.Message.Content)
+		if parsed.Error != "" {
+			streamErr = fmt.Errorf("ollama: %s", parsed.Error)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	cleaned := trimRepeatTail(strings.TrimSpace(text.String()))
+	if cleaned != "" && (streamErr == nil || visionGiveUp(streamErr)) {
+		clipped, _ := pipeline.Clip(cleaned, 2000)
+		return clipped, nil
+	}
+	if streamErr != nil {
+		return "", streamErr
+	}
+	return "", fmt.Errorf("ollama вернул пустое описание")
+}
+
+// trimRepeatTail срезает хвост из одного и того же символа или слова.
+func trimRepeatTail(s string) string {
+	runes := []rune(s)
+	if len(runes) >= 4 {
+		last := runes[len(runes)-1]
+		i := len(runes) - 1
+		for i >= 0 && runes[i] == last {
+			i--
+		}
+		if len(runes)-(i+1) >= 4 {
+			s = strings.TrimSpace(string(runes[:i+1]))
+		}
+	}
+	fields := strings.Fields(s)
+	if len(fields) >= 4 {
+		last := fields[len(fields)-1]
+		i := len(fields) - 1
+		for i >= 0 && fields[i] == last {
+			i--
+		}
+		if len(fields)-(i+1) >= 4 {
+			s = strings.Join(fields[:i+1], " ")
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // fitVisionJPEG уменьшает длинную сторону кадра. Иначе картинка съедает

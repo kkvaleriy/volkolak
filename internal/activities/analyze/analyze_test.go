@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,8 +28,10 @@ func TestChatContent(t *testing.T) {
 func TestDescribeSendsImageToOllama(t *testing.T) {
 	var got struct {
 		Model   string `json:"model"`
+		Stream  bool   `json:"stream"`
 		Options struct {
 			Temperature   float64 `json:"temperature"`
+			NumPredict    int     `json:"num_predict"`
 			NumCtx        int     `json:"num_ctx"`
 			RepeatPenalty float64 `json:"repeat_penalty"`
 		} `json:"options"`
@@ -57,9 +60,11 @@ func TestDescribeSendsImageToOllama(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "пустая комната", text)
 	require.Equal(t, "qwen2.5vl:3b", got.Model)
-	require.Equal(t, 0.6, got.Options.Temperature)
+	require.True(t, got.Stream)
+	require.Equal(t, 0.2, got.Options.Temperature)
+	require.Equal(t, 80, got.Options.NumPredict)
 	require.Equal(t, 4096, got.Options.NumCtx)
-	require.Equal(t, 1.2, got.Options.RepeatPenalty)
+	require.Equal(t, 1.15, got.Options.RepeatPenalty)
 	require.NotEmpty(t, got.Messages)
 	require.NotEmpty(t, got.Messages[0].Images[0])
 }
@@ -91,7 +96,20 @@ func TestDescribeRetriesTokenRepeatOnSmallerFrame(t *testing.T) {
 	text, err := activities.describe(context.Background(), imagePath)
 	require.NoError(t, err)
 	require.Equal(t, "тёмный кадр", text)
-	require.Equal(t, []float64{0.6, 0.8}, temperatures)
+	require.Equal(t, []float64{0.2, 0.2}, temperatures)
+}
+
+func TestReadChatStreamKeepsTextBeforeRepeatAbort(t *testing.T) {
+	var raw strings.Builder
+	raw.WriteString("{\"message\":{\"content\":\"В кадре пустая комната.\"}}\n")
+	for range 5 {
+		raw.WriteString("{\"message\":{\"content\":\".\"}}\n")
+	}
+	raw.WriteString("{\"error\":\"prediction aborted, token repeat limit reached\"}\n")
+
+	text, err := readChatStream(strings.NewReader(raw.String()))
+	require.NoError(t, err)
+	require.Equal(t, "В кадре пустая комната", text)
 }
 
 func TestFitVisionJPEGShrinksLongEdge(t *testing.T) {
