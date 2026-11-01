@@ -82,7 +82,7 @@ services:
     volumes:
       - ./deploy/temporal/scripts:/scripts:ro
     entrypoint: ["/bin/sh", "/scripts/create-namespace.sh"]
-    restart: on-failure:5
+    restart: on-failure:30
 
   temporal-ui:
     image: temporalio/ui:2.49.1

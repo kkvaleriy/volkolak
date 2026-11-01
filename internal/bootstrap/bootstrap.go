@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,9 +36,16 @@ func Database(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 
 // TemporalClient подключается к фронтенду Temporal с повторами.
 func TemporalClient(ctx context.Context, address string) (client.Client, error) {
+	hostPort := temporalHostPort(address)
 	var last error
 	for attempt := 1; attempt <= 30; attempt++ {
-		c, err := client.Dial(client.Options{HostPort: address})
+		c, err := client.Dial(client.Options{
+			HostPort: hostPort,
+			ConnectionOptions: client.ConnectionOptions{
+				// Иначе холодный фронтенд на Docker Desktop не укладывается в 5 секунд.
+				GetSystemInfoTimeout: 30 * time.Second,
+			},
+		})
 		if err == nil {
 			return c, nil
 		}
@@ -47,6 +55,15 @@ func TemporalClient(ctx context.Context, address string) (client.Client, error) 
 		}
 	}
 	return nil, fmt.Errorf("temporal %s: %w", address, last)
+}
+
+// temporalHostPort обходит gRPC-резолвер dns:///. На встроенном DNS Docker он
+// не успевает за таймаут клиента, хотя сам сервер уже отвечает.
+func temporalHostPort(address string) string {
+	if strings.Contains(address, "://") {
+		return address
+	}
+	return "passthrough:///" + address
 }
 
 // WaitFile ждёт непустой файл. Нужен для тома с моделью whisper.
