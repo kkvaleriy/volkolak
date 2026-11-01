@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"os"
@@ -186,18 +189,40 @@ func (a *Activities) describe(ctx context.Context, imagePath string) (string, er
 		return "", fail.Input("кадр больше 20 МБ")
 	}
 
+	jpegBytes, err := fitVisionJPEG(body, 768)
+	if err != nil {
+		return "", err
+	}
+	text, err := a.chat(ctx, jpegBytes, 0.6, 1.2)
+	if err == nil || !strings.Contains(err.Error(), "token repeat") {
+		return text, err
+	}
+	actlog.Info(ctx, "модель зациклилась, повторяю на меньшем кадре")
+	jpegBytes, err = fitVisionJPEG(body, 480)
+	if err != nil {
+		return "", err
+	}
+	return a.chat(ctx, jpegBytes, 0.8, 1.4)
+}
+
+func (a *Activities) chat(ctx context.Context, jpegBytes []byte, temperature, repeatPenalty float64) (string, error) {
 	payload := map[string]any{
 		"model":      a.Model,
 		"stream":     false,
 		"keep_alive": "30m",
 		"options": map[string]any{
-			"temperature": 0.1,
-			"num_predict": 256,
+			"temperature":    temperature,
+			"num_predict":    192,
+			"num_ctx":        4096,
+			"repeat_penalty": repeatPenalty,
+			"repeat_last_n":  192,
+			"top_p":          0.9,
+			"top_k":          40,
 		},
 		"messages": []map[string]any{{
 			"role":    "user",
 			"content": visionPrompt,
-			"images":  []string{base64.StdEncoding.EncodeToString(body)},
+			"images":  []string{base64.StdEncoding.EncodeToString(jpegBytes)},
 		}},
 	}
 	raw, err := json.Marshal(payload)
@@ -227,6 +252,77 @@ func (a *Activities) describe(ctx context.Context, imagePath string) (string, er
 		return "", fmt.Errorf("ollama статус %d: %s", resp.StatusCode, snippet)
 	}
 	return chatContent(respBody)
+}
+
+// fitVisionJPEG уменьшает длинную сторону кадра. Иначе картинка съедает
+// контекст qwen2.5vl, и модель зацикливается на одном токене.
+// Не-JPEG возвращается как есть.
+func fitVisionJPEG(data []byte, maxEdge int) ([]byte, error) {
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data, nil
+	}
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= maxEdge && height <= maxEdge {
+		return data, nil
+	}
+	newW, newH := width, height
+	if width >= height {
+		newW = maxEdge
+		newH = height * maxEdge / width
+	} else {
+		newH = maxEdge
+		newW = width * maxEdge / height
+	}
+	if newW < 1 {
+		newW = 1
+	}
+	if newH < 1 {
+		newH = 1
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, resizeArea(img, newW, newH), &jpeg.Options{Quality: 85}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func resizeArea(src image.Image, width, height int) *image.RGBA {
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	bounds := src.Bounds()
+	srcW, srcH := bounds.Dx(), bounds.Dy()
+	for y := 0; y < height; y++ {
+		y0 := y * srcH / height
+		y1 := (y + 1) * srcH / height
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
+		for x := 0; x < width; x++ {
+			x0 := x * srcW / width
+			x1 := (x + 1) * srcW / width
+			if x1 <= x0 {
+				x1 = x0 + 1
+			}
+			var red, green, blue, count int
+			for sy := y0; sy < y1; sy++ {
+				for sx := x0; sx < x1; sx++ {
+					r, g, b, _ := src.At(bounds.Min.X+sx, bounds.Min.Y+sy).RGBA()
+					red += int(r >> 8)
+					green += int(g >> 8)
+					blue += int(b >> 8)
+					count++
+				}
+			}
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8(red / count),
+				G: uint8(green / count),
+				B: uint8(blue / count),
+				A: 255,
+			})
+		}
+	}
+	return dst
 }
 
 func (a *Activities) httpClient() *http.Client {
