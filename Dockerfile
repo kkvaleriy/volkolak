@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS whisper-build
+# sm_89 — RTX 40xx, sm_120 — RTX 50xx. Один поток nvcc, иначе сборка
+# легко занимает больше 32 ГБ: каждый .cu компилируется отдельно под каждую архитектуру.
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS whisper-build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates cmake git \
@@ -8,8 +10,9 @@ RUN apt-get update \
 WORKDIR /src
 RUN git clone --depth 1 --branch v1.9.2 https://github.com/ggml-org/whisper.cpp.git . \
     && cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
-        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100;120" \
-    && cmake --build build --parallel --target whisper-cli \
+        -DCMAKE_CUDA_ARCHITECTURES="89;120" \
+        -DCMAKE_CUDA_FLAGS="--threads=1" \
+    && cmake --build build --parallel 1 --target whisper-cli \
     && bin="$(find build -type f -name whisper-cli -perm -111 | head -n 1)" \
     && test -n "$bin" \
     && cp "$bin" /usr/local/bin/whisper-cli
@@ -29,7 +32,7 @@ RUN apt-get update \
 COPY --from=go-build /out/worker /usr/local/bin/worker
 ENTRYPOINT ["/usr/local/bin/worker"]
 
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS transcribe
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04 AS transcribe
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgomp1 libstdc++6 \
