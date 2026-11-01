@@ -215,6 +215,9 @@ services:
       S3_USE_SSL: ${S3_USE_SSL}
       FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
       MAX_FRAMES: ${MAX_FRAMES}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./deploy/worker/entrypoint.sh:/entrypoint.sh:ro
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -246,6 +249,9 @@ services:
       S3_USE_SSL: ${S3_USE_SSL}
       FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
       MAX_FRAMES: ${MAX_FRAMES}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./deploy/worker/entrypoint.sh:/entrypoint.sh:ro
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -277,8 +283,10 @@ services:
       S3_USE_SSL: ${S3_USE_SSL}
       FRAME_INTERVAL_SEC: ${FRAME_INTERVAL_SEC}
       MAX_FRAMES: ${MAX_FRAMES}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - whisper-models:/models
+      - ./deploy/worker/entrypoint.sh:/entrypoint.sh:ro
     stop_grace_period: 30s
     restart: unless-stopped
 
