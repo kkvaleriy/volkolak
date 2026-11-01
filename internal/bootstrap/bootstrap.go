@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
+	"google.golang.org/grpc"
 )
 
 // Database открывает пул и ждёт, пока Postgres примет запрос.
@@ -44,6 +46,13 @@ func TemporalClient(ctx context.Context, address string) (client.Client, error) 
 			ConnectionOptions: client.ConnectionOptions{
 				// Иначе холодный фронтенд на Docker Desktop не укладывается в 5 секунд.
 				GetSystemInfoTimeout: 30 * time.Second,
+				// tcp4 не ждёт AAAA. Чистый Go-резолвер на DNS Docker.
+				DialOptions: []grpc.DialOption{
+					grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+						var dialer net.Dialer
+						return dialer.DialContext(ctx, "tcp4", addr)
+					}),
+				},
 			},
 		})
 		if err == nil {
